@@ -1401,6 +1401,7 @@ p,li{max-width:75ch;}
 @media (max-width:760px){ html{font-size:104%;} .carta-nome{font-size:2.15rem;} .virt-nome{font-size:.76rem !important;letter-spacing:-.01em;font-weight:600;} }
 @media (max-width:760px){ .virt-nome{font-size:.9rem !important;} }
 .portrait-vazio{color:var(--hope);opacity:.75;}
+.hab-ed .field{margin-bottom:8px;} .hab-ocultas{margin:6px 0;font-size:.95rem;display:flex;gap:6px 10px;flex-wrap:wrap;align-items:center;}
 </style>
 </head>
 <body>
@@ -9545,7 +9546,10 @@ function domDaFicha(f){ return DOM_ID[f.dom] || null; }
 function nomeDom(f){ return (domDaFicha(f)||{}).nome || '—'; }
 
 /* habilidades liberadas: lista [{dom, idx}] — uma por nível */
+function habsDoDom(domId, nivel){ const dm = DOM_ID[domId]; if(!dm) return []; const n = Math.max(1, Math.min(dm.especiais.length, Number(nivel)||1)); return dm.especiais.slice(0,n).map((_,i)=>({dom:domId, idx:i})); }
 function habilidadesLiberadas(f){
+  // ficha com Dom mas sem habilidades registradas (criada à mão, importada ou com o Dom trocado): libera as do nível
+  if((!Array.isArray(f.habs) || !f.habs.length) && f.dom && DOM_ID[f.dom]) f.habs = habsDoDom(f.dom, f.nivel);
   const lista = Array.isArray(f.habs) && f.habs.length? f.habs : [];
   return lista.map((h,i)=>{ const dm = DOM_ID[h.dom]; const hab = dm && dm.especiais[h.idx]; return hab? {slot:i, dom:dm, idx:h.idx, hab} : null; }).filter(Boolean);
 }
@@ -9811,7 +9815,15 @@ App.domUsar = (fid, slot)=>{
   const f = getFicha(fid), lib = habilidadesLiberadas(f).find(x=>x.slot===slot); if(!lib) return;
   const sel = document.getElementById('ddn_'+fid+'_'+slot);
   const n = lib.hab.dadosFixos || Math.max(1, Math.min(4, Number(sel && sel.value)||1));
-  resolverDados(f, n, {rotulo:lib.hab.nome, dom:lib.dom.nome, texto:lib.hab.texto, acidentes:lib.dom.acidentes});
+  const v = habVista(f, lib.dom.id, lib.idx, lib.hab);
+  resolverDados(f, n, {rotulo:v.nome, dom:lib.dom.nome, texto:v.texto, acidentes:lib.dom.acidentes});
+};
+App.domUsarX = (fid, xid)=>{
+  const f = getFicha(fid), h = (f.habsExtra||[]).find(x=>x.id===xid); if(!h) return;
+  const sel = document.getElementById('ddx_'+fid+'_'+xid);
+  const n = Math.max(1, Math.min(4, Number(sel && sel.value)||1));
+  const dm = domDaFicha(f);
+  resolverDados(f, n, {rotulo:h.nome||'Habilidade', dom:dm? dm.nome:'Próprias', texto:h.texto||'', acidentes:dm? dm.acidentes:ACIDENTES_MAGICOS});
 };
 App.feiticoUsar = (fid, nome)=>{
   const f = getFicha(fid), sp = FEITICOS.find(x=>x.nome===nome); if(!sp) return;
@@ -9962,14 +9974,17 @@ App.ppCurar = (fid)=>{
   const f = getFicha(fid); const v = prompt('Quantos PC recuperar?', '1'); if(v===null) return;
   const n = Math.max(0, parseInt(v,10)||0); curarPC(f, n); salvarUmaFicha(f);
 };
-App.fCampoNomeDom = (id, v)=>{ const f = getFicha(id); f.dom = v; salvarUmaFicha(f); };
+App.fCampoNomeDom = (id, v)=>{ const f = getFicha(id), antigo = f.dom; f.dom = v;
+  // troca de Dom: as habilidades do Dom anterior dão lugar às do novo, no nível atual (as de Dons Abundantes de outros Dons ficam)
+  const outras = (f.habs||[]).filter(h=>h.dom!==antigo && h.dom!==v);
+  f.habs = [...habsDoDom(v, f.nivel), ...outras]; salvarUmaFicha(f); };
 
 /* ---------------- Seções retráteis ---------------- */
 state.colapsos = (()=>{ try{ return JSON.parse(localStorage.getItem('pp:colapsos')||'{}')||{}; }catch(e){ return {}; } })();
 function Colapsavel(fid, id, titulo, corpo, o){
   o = o||{};
   const key = fid+':'+id;
-  const aberto = (key in state.colapsos)? !!state.colapsos[key] : !!o.aberto;
+  const aberto = o.forcar? true : (key in state.colapsos)? !!state.colapsos[key] : !!o.aberto;
   const dom = 'cx_'+String(key).replace(/[^a-z0-9]/gi,'_');
   return `<section class="cx ${o.mini?'mini':''} ${o.cls||''} ${aberto?'aberto':''}">
     <div class="cx-cab">
@@ -10149,29 +10164,94 @@ App.maldicaoAdd = (fid)=>{
 
 /* ---------------- Habilidades do Dom ---------------- */
 function opcoesDados(disp){ return [1,2,3,4].filter(n=>n<=Math.max(1,disp)).map(n=>`<option value="${n}">${n} dado${n>1?'s':''}</option>`).join(''); }
+/* ---- habilidades editáveis: ajustes sobre o livro, ocultas e habilidades próprias ---- */
+function habKey(domId, idx, inata){ return (inata?'i:':'e:')+domId+':'+idx; }
+function habVista(f, domId, idx, hab, inata){
+  const o = (f.habsEdit||{})[habKey(domId,idx,inata)];
+  return {nome:(o&&o.nome!=null)?o.nome:hab.nome, texto:(o&&o.texto!=null)?o.texto:hab.texto, mod:!!o};
+}
+const _escA = (t)=> esc(t).replace(/"/g,'&quot;');
+function habEditorHTML(f, ref, v, opts){
+  // ref: string usada nos handlers (chave do livro ou id próprio)
+  const r = String(ref).replace(/'/g,"\\'");
+  return `<div class="hab-ed">
+    <div class="field"><label>Nome</label><input value="${_escA(v.nome)}" oninput="App.habSet('${f.id}','${r}','nome',this.value)"></div>
+    <div class="field"><label>Texto (use [SOMA] e [DADOS] se quiser)</label><textarea rows="4" class="notas-ta" oninput="App.habSet('${f.id}','${r}','texto',this.value)">${esc(v.texto)}</textarea></div>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px;">
+      ${opts.restaurar? `<button class="btn btn-sm" onclick="App.habRestaurar('${f.id}','${r}')">Restaurar texto do livro</button>`:''}
+      <button class="btn btn-sm btn-danger" onclick="App.habExcluir('${f.id}','${r}')">${opts.proprio?'Excluir':'Remover da ficha'}</button>
+    </div></div>`;
+}
 function DomPanelHTML(f){
   const dm = domDaFicha(f);
-  if(!dm) return Colapsavel(f.id,'dom','Dom', `<p class="muted">Esta ficha não tem um Dom escolhido. Edite a identidade (lápis) para escolher.</p>`, {icone:'varinha', aberto:true});
+  const ed = painelEditando('dom', f.id);
+  const lapis = lapisEditBtn('dom', f.id);
+  f.habsEdit = f.habsEdit||{}; f.habsExtra = f.habsExtra||[]; f.habsOcultas = f.habsOcultas||[];
+  const oculta = (k)=> f.habsOcultas.includes(k);
   const lib = habilidadesLiberadas(f), disp = ddDisp(f), bloq = f.semDD;
-  const usadas = new Set(lib.map(x=>x.dom.id+':'+x.idx));
+  const selDados = (id)=> `<select id="${id}" aria-label="Quantos Dados de Dom" style="${SEL_CSS}">${opcoesDados(disp)}</select>`;
+  const usarBtn = (ok, click, motivo)=> `<button class="btn btn-sm btn-purple" ${ok?'':'disabled'} onclick="${click}" title="${ok?'':motivo}">${icon('dado',14)} Usar</button>`;
+  const motivo = bloq?'Trauma: sem Dados de Dom':'Sem Dados de Dom livres';
+  let esp = '', ocultasEsp = [];
+  if(dm){
+    lib.forEach(x=>{
+      const k = habKey(x.dom.id, x.idx, false);
+      if(oculta(k)){ ocultasEsp.push({k, nome:habVista(f,x.dom.id,x.idx,x.hab).nome}); return; }
+      const v = habVista(f, x.dom.id, x.idx, x.hab), fixo = x.hab.dadosFixos, ok = !bloq && disp>=(fixo||1);
+      const ctrl = `${fixo? `<span class="muted cx-fixo">${fixo} dados</span>` : selDados('ddn_'+f.id+'_'+x.slot)} ${usarBtn(ok, `App.domUsar('${f.id}',${x.slot})`, motivo)}`;
+      const corpo = ed? habEditorHTML(f, k, v, {restaurar:v.mod}) : `<div class="hab-txt">${fmtTxt(v.texto)}</div>`;
+      esp += Colapsavel(f.id,'hab'+x.dom.id+x.slot, `${x.slot+1}. ${esc(v.nome)}`, corpo,
+        {mini:true, cls:'hab-esp', resumo:`${x.dom.id!==f.dom? esc(x.dom.nome)+' · ':''}nv ${x.slot+1}${v.mod?' · editada':''}`, extra:ctrl, forcar:ed});
+    });
+  }
+  // habilidades próprias (especiais)
+  f.habsExtra.filter(h=>h.tipo==='esp').forEach(h=>{
+    const ok = !bloq && disp>=1;
+    const ctrl = `${selDados('ddx_'+f.id+'_'+h.id)} ${usarBtn(ok, `App.domUsarX('${f.id}','${h.id}')`, motivo)}`;
+    const corpo = ed? habEditorHTML(f, 'x:'+h.id, h, {proprio:true}) : `<div class="hab-txt">${fmtTxt(h.texto||'')}</div>`;
+    esp += Colapsavel(f.id,'hx'+h.id, esc(h.nome||'Sem nome'), corpo, {mini:true, cls:'hab-esp', resumo:'própria', extra:ctrl, forcar:ed});
+  });
+  if(!esp) esp = '<p class="muted">Nenhuma habilidade especial.</p>';
+  // inatas
+  let inatas = '', ocultasIn = [];
+  if(dm) dm.inatas.forEach((h,i)=>{
+    const k = habKey(dm.id,i,true);
+    if(oculta(k)){ ocultasIn.push({k, nome:habVista(f,dm.id,i,h,true).nome}); return; }
+    const v = habVista(f,dm.id,i,h,true);
+    const corpo = ed? habEditorHTML(f,k,v,{restaurar:v.mod}) : `<div class="hab-txt">${esc(v.texto)}</div>`;
+    inatas += Colapsavel(f.id,'inata'+dm.id+i, esc(v.nome), corpo, {mini:true, cls:'hab-inata', resumo:v.mod?'inata · editada':'inata', forcar:ed});
+  });
+  f.habsExtra.filter(h=>h.tipo==='inata').forEach(h=>{
+    const corpo = ed? habEditorHTML(f,'x:'+h.id,h,{proprio:true}) : `<div class="hab-txt">${esc(h.texto||'')}</div>`;
+    inatas += Colapsavel(f.id,'hx'+h.id, esc(h.nome||'Sem nome'), corpo, {mini:true, cls:'hab-inata', resumo:'própria', forcar:ed});
+  });
+  const ocultasHTML = (l)=> l.length? `<div class="hab-ocultas muted">Removidas: ${l.map(o=>`${esc(o.nome)} <button class="btn btn-sm" onclick="App.habRestaurarOculta('${f.id}','${o.k}')">Trazer de volta</button>`).join(' ')}</div>`:'';
+  const addBar = (tipo)=> ed? `<div class="row" style="margin:8px 0;"><button class="btn btn-sm" onclick="App.habAdd('${f.id}','${tipo}')">+ ${tipo==='esp'?'Habilidade especial':'Habilidade inata'}</button></div>`:'';
   const futuras = [];
-  for(let i=lib.length;i<4;i++){ const h = dm.especiais[i]; if(h && !usadas.has(dm.id+':'+i)) futuras.push({n:i+1,h}); }
-  const esp = lib.map(x=>{
-    const fixo = x.hab.dadosFixos, ok = !bloq && disp>=(fixo||1);
-    const ctrl = `${fixo? `<span class="muted cx-fixo">${fixo} dados</span>` : `<select id="ddn_${f.id}_${x.slot}" aria-label="Quantos Dados de Dom" style="${SEL_CSS}">${opcoesDados(disp)}</select>`}
-      <button class="btn btn-sm btn-purple" ${ok?'':'disabled'} onclick="App.domUsar('${f.id}',${x.slot})" title="${ok?'':(bloq?'Trauma: sem Dados de Dom':'Sem Dados de Dom livres')}">${icon('dado',14)} Usar</button>`;
-    return Colapsavel(f.id,'hab'+x.dom.id+x.slot, `${x.slot+1}. ${esc(x.hab.nome)}`, `<div class="hab-txt">${fmtTxt(x.hab.texto)}</div>`,
-      {mini:true, cls:'hab-esp', resumo:`${x.dom.id!==f.dom? esc(x.dom.nome)+' · ':''}nv ${x.slot+1}`, extra:ctrl});
-  }).join('') || '<p class="muted">Nenhuma habilidade liberada ainda.</p>';
-  const inatas = dm.inatas.map((h,i)=> Colapsavel(f.id,'inata'+dm.id+i, esc(h.nome), `<div class="hab-txt">${esc(h.texto)}</div>`, {mini:true, cls:'hab-inata', resumo:'inata'})).join('');
+  if(dm){ const usadas = new Set(lib.map(x=>x.dom.id+':'+x.idx)); for(let i=lib.length;i<4;i++){ const h = dm.especiais[i]; if(h && !usadas.has(dm.id+':'+i)) futuras.push({n:i+1,h}); } }
+  const acid = dm? Colapsavel(f.id,'acid'+dm.id, 'Tabela de Acidentes (duplas nos Dados de Dom)', dm.acidentes.map(a=>`<div class="acid-lin"><b>${a.n}s — ${esc(a.nome)}:</b> ${esc(a.texto)}</div>`).join(''), {mini:true}) : '';
   const corpo = `
-    <p class="muted dom-frase">${esc(dm.frase)}</p>
-    <div class="sub-rot">Habilidades especiais <span class="muted">(gastam Dados de Dom)</span></div>${esp}
-    ${futuras.length? `<div class="muted" style="font-size:.85rem;margin:6px 0;">Próximas: ${futuras.map(x=>`nível ${x.n} — ${esc(x.h.nome)}`).join(' · ')}</div>`:''}
-    <div class="sub-rot">Habilidades inatas</div>${inatas}
-    ${Colapsavel(f.id,'acid'+dm.id, 'Tabela de Acidentes (duplas nos Dados de Dom)', dm.acidentes.map(a=>`<div class="acid-lin"><b>${a.n}s — ${esc(a.nome)}:</b> ${esc(a.texto)}</div>`).join(''), {mini:true})}`;
-  return Colapsavel(f.id,'dom', `Dom: ${esc(dm.nome)}${f.elemento? ' · '+esc(f.elemento):''}`, corpo, {icone:'varinha', resumo:`${disp}/${ddMaxDe(f)} Dados de Dom`, aberto:true});
+    ${dm? `<p class="muted dom-frase">${esc(dm.frase)}</p>`:`<p class="muted">Esta ficha não tem um Dom escolhido. Edite a identidade para escolher, ou crie habilidades próprias com o lápis.</p>`}
+    <div class="sub-rot">Habilidades especiais <span class="muted">(gastam Dados de Dom)</span></div>${esp}${addBar('esp')}${ocultasHTML(ocultasEsp)}
+    ${futuras.length? `<div class="muted" style="font-size:.9rem;margin:6px 0;">Próximas: ${futuras.map(x=>`nível ${x.n} — ${esc(x.h.nome)}`).join(' · ')}</div>`:''}
+    <div class="sub-rot">Habilidades inatas</div>${inatas||'<p class="muted">Nenhuma habilidade inata.</p>'}${addBar('inata')}${ocultasHTML(ocultasIn)}
+    ${acid}`;
+  return Colapsavel(f.id,'dom', dm? `Dom: ${esc(dm.nome)}${f.elemento? ' · '+esc(f.elemento):''}` : 'Habilidades', corpo, {icone:'varinha', resumo: dm? `${disp}/${ddMaxDe(f)} Dados de Dom`:'', extra:lapis, aberto:true});
 }
+App.habSet = (fid, ref, campo, val)=>{
+  const f = getFicha(fid); if(ref.startsWith('x:')){ const h = (f.habsExtra||[]).find(x=>x.id===ref.slice(2)); if(h) h[campo]=val; }
+  else { f.habsEdit = f.habsEdit||{}; (f.habsEdit[ref] = f.habsEdit[ref]||{})[campo]=val; }
+  agendarSalvar(f);
+};
+App.habRestaurar = (fid, ref)=>{ const f = getFicha(fid); delete (f.habsEdit||{})[ref]; salvarUmaFicha(f); };
+App.habExcluir = (fid, ref)=>{ const f = getFicha(fid);
+  if(!confirm('Remover esta habilidade da ficha?')) return;
+  if(ref.startsWith('x:')) f.habsExtra = (f.habsExtra||[]).filter(x=>x.id!==ref.slice(2));
+  else { f.habsOcultas = f.habsOcultas||[]; if(!f.habsOcultas.includes(ref)) f.habsOcultas.push(ref); }
+  salvarUmaFicha(f); };
+App.habRestaurarOculta = (fid, k)=>{ const f = getFicha(fid); f.habsOcultas = (f.habsOcultas||[]).filter(x=>x!==k); salvarUmaFicha(f); };
+App.habAdd = (fid, tipo)=>{ const f = getFicha(fid); f.habsExtra = f.habsExtra||[];
+  f.habsExtra.push({id:uid(), tipo, nome:'Nova habilidade', texto:''}); salvarUmaFicha(f); };
 
 function MagiasPanelHTML(f){
   const lista = f.feiticos||[]; const ed = painelEditando('magias', f.id), disp = ddDisp(f);
